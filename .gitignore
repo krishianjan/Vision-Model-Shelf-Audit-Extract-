@@ -1,0 +1,49 @@
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+.env.production.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+ENV/
+
+# Node & Web
+node_modules/
+.expo/
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble
+
+# Logs & Temp
+*.log
+logs/
+tmp/
+temp/
+
+# Personal Notes (do NOT commit tracking files)
+UNDERSTANDING_SUMMARY.md
+*_NOTES.md
+*_TRACKING.md
+MEMORY.md

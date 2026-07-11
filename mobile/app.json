@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "Kosha Shelf Audit",
+    "slug": "kosha-shelf-audit",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "kosha",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ai.kosha.shelftaudit",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Take shelf photos for audit",
+        "NSMicrophoneUsageDescription": "Record voice notes about shelf observations",
+        "NSLocationWhenInUseUsageDescription": "Auto-suggest nearby store accounts",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "ai.kosha.shelfaudit",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-camera",
+      "expo-location",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
