@@ -97,106 +97,163 @@ cd web && npm run dev
 
 Go to **SQL Editor** → Paste this:
 
-```sql
--- 1. Users
-CREATE TABLE IF NOT EXISTS users (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  first_name TEXT,
-  last_name TEXT,
-  role TEXT DEFAULT 'rep',
-  created_at TIMESTAMP DEFAULT NOW()
-);
+sql
+    -- Extensions
+    CREATE EXTENSION IF NOT EXISTS vector;
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    
+    -- 1. ORGANIZATIONS
+    CREATE TABLE IF NOT EXISTS accounts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      org_id UUID NOT NULL,
+      name TEXT NOT NULL,
+      chain TEXT,
+      channel_type TEXT,
+      address TEXT,
+      latitude DOUBLE PRECISION,
+      longitude DOUBLE PRECISION,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    
+    -- 2. PRODUCT CATALOG (SKUs with vector embeddings for RAG)
+    CREATE TABLE IF NOT EXISTS products (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      brand TEXT NOT NULL,
+      product_name TEXT NOT NULL,
+      size_ml INTEGER,
+      pack_count INTEGER DEFAULT 1,
+      category TEXT,
+      upc TEXT,
+      embedding VECTOR(512),
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    
+    -- Index for pgvector similarity search
+    CREATE INDEX IF NOT EXISTS idx_products_embedding ON products USING ivfflat (embedding vector_cosine_ops);
+    
+    -- 3. SHELF AUDITS
+    CREATE TABLE IF NOT EXISTS shelf_audits (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      account_id UUID NOT NULL REFERENCES accounts(id),
+      org_id UUID NOT NULL,
+      captured_by UUID NOT NULL,
+      captured_at TIMESTAMPTZ NOT NULL,
+      received_at TIMESTAMPTZ DEFAULT now(),
+      fixture_type TEXT,
+      capture_quality JSONB,
+      status TEXT NOT NULL,
+      version INTEGER DEFAULT 1,
+      superseded_by UUID REFERENCES shelf_audits(id),
+      model_version TEXT,
+      latency_ms INTEGER,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    
+    -- 4. AUDIT OBSERVATIONS (Extracted product data with confidence)
+    CREATE TABLE IF NOT EXISTS audit_observations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      audit_id UUID NOT NULL REFERENCES shelf_audits(id) ON DELETE CASCADE,
+      matched_sku_id UUID REFERENCES products(id),
+      sku_guess_text TEXT,
+      brand_read TEXT,
+      size_read TEXT,
+      facings INTEGER,
+      shelf_position TEXT,
+      price_value NUMERIC,
+      price_confidence NUMERIC,
+      field_confidence JSONB DEFAULT '{}'::jsonb,
+      status TEXT NOT NULL,
+      match_method TEXT,
+      match_similarity NUMERIC,
+      notes TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      product_read TEXT,
+      flavor_variant TEXT,
+      legibility TEXT DEFAULT 'fully_readable',
+      object_type TEXT DEFAULT 'bottle',
+      org_id UUID
+    );
+    
+    -- 5. AUDIT IMAGES (Multiple shots per audit)
+    CREATE TABLE IF NOT EXISTS audit_images (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      audit_id UUID NOT NULL REFERENCES shelf_audits(id) ON DELETE CASCADE,
+      storage_path TEXT NOT NULL,
+      preview_path TEXT,
+      content_hash TEXT NOT NULL,
+      width_px INTEGER,
+      height_px INTEGER,
+      size_bytes INTEGER,
+      quality_score NUMERIC,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    
+    -- 6. PIPELINE EVENTS (Debug/audit trail)
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      audit_id UUID NOT NULL REFERENCES shelf_audits(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      payload JSONB DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    
+    -- 7. GUARDRAIL REJECTIONS (Non-alcohol/selfie tracking)
+    CREATE TABLE IF NOT EXISTS guardrail_rejections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      org_id UUID NOT NULL,
+      captured_by UUID NOT NULL,
+      account_id UUID,
+      storage_path TEXT NOT NULL,
+      content_hash TEXT,
+      category TEXT NOT NULL,
+      clip_confidence NUMERIC,
+      reason TEXT,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    
+    -- 8. STORE ENTRY CAPTURES (Geofenced check-in)
+    CREATE TABLE IF NOT EXISTS store_entry_captures (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      account_id UUID,
+      org_id UUID NOT NULL,
+      captured_by UUID NOT NULL,
+      storage_path TEXT NOT NULL,
+      ocr_store_name TEXT,
+      ocr_confidence NUMERIC,
+      latitude DOUBLE PRECISION,
+      longitude DOUBLE PRECISION,
+      captured_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+    
+    -- 9. REVIEW QUEUE (Unmatched observations for manual verification)
+    CREATE TABLE IF NOT EXISTS review_queue (
+      observation_id UUID,
+      audit_id UUID,
+      account_id UUID,
+      captured_by UUID,
+      brand_read TEXT,
+      sku_guess_text TEXT,
+      status TEXT,
+      field_confidence JSONB,
+      min_confidence NUMERIC,
+      captured_at TIMESTAMPTZ
+    );
+    
+    -- Sample data
+    INSERT INTO products (brand, product_name, size_ml, category, upc) VALUES
+      ('Coca-Cola', 'Zero Sugar', 330, 'beverages', '049000028904'),
+      ('Pepsi', 'Diet Pepsi', 355, 'beverages', '012000001234'),
+      ('Sprite', 'Lemon Lime', 500, 'beverages', '049000028905');
+    
+    INSERT INTO accounts (org_id, name, chain, channel_type) VALUES
+      ('00000000-0000-0000-0000-000000000001', 'time sq Store', 'Reice', 'hypermarket'),
+      ('00000000-0000-0000-0000-000000000001', 'Deli Store', NULL, 'liquor_store'),
+      ('00000000-0000-0000-0000-000000000001', 'nyc Store', 'Metro', 'supermarket');
+    
 
--- 2. Accounts (Stores)
-CREATE TABLE IF NOT EXISTS accounts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
-  location TEXT,
-  region TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- 3. Shelf Audits
-CREATE TABLE IF NOT EXISTS shelf_audits (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  rep_id UUID NOT NULL REFERENCES users(id),
-  account_id UUID NOT NULL REFERENCES accounts(id),
-  image_path TEXT NOT NULL,
-  capture_quality JSONB,
-  status TEXT DEFAULT 'captured',
-  captured_at TIMESTAMP DEFAULT NOW(),
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- 4. Observations (Extracted Products)
-CREATE TABLE IF NOT EXISTS audit_observations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  audit_id UUID NOT NULL REFERENCES shelf_audits(id),
-  observation JSONB NOT NULL,
-  confidence_score NUMERIC(10,2),
-  verified BOOLEAN DEFAULT FALSE,
-  judge_verdict JSONB,
-  grounding_status TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- 5. SKUs
-CREATE TABLE IF NOT EXISTS skus (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  sku_code TEXT UNIQUE NOT NULL,
-  brand_id UUID,
-  product_name TEXT NOT NULL,
-  category TEXT,
-  typical_facings_avg INT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- 6. Brands
-CREATE TABLE IF NOT EXISTS brands (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT UNIQUE NOT NULL,
-  category TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- 7. Metrics
-CREATE TABLE IF NOT EXISTS audit_metrics (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  rep_id UUID REFERENCES users(id),
-  metric_date DATE,
-  total_audits_count INT,
-  successful_audits INT,
-  avg_quality_score NUMERIC(10,2),
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- 8. Config
-CREATE TABLE IF NOT EXISTS system_config (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  config_key TEXT UNIQUE NOT NULL,
-  config_value TEXT,
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-INSERT INTO system_config (config_key, config_value)
-VALUES ('confidence_threshold_default', '0.75');
-
--- Enable pgvector
-CREATE EXTENSION IF NOT EXISTS vector;
-
--- Sample data
-INSERT INTO brands (name, category) VALUES
-  ('Coca-Cola', 'Beverages'),
-  ('Pepsi', 'Beverages'),
-  ('Sprite', 'Beverages');
-
-INSERT INTO accounts (name, location, region) VALUES
-  ('Mumbai Store', 'Mumbai', 'West'),
-  ('Delhi Store', 'Delhi', 'North'),
-  ('Bangalore Store', 'Bangalore', 'South');
-```
 
 Click **Run** to create all tables.
 
