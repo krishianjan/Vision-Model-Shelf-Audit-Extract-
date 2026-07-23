@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from "react";
 import {
   View, Text, ScrollView, StyleSheet,
-  ActivityIndicator, SectionList,
+  ActivityIndicator, SectionList, Pressable, Share,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams } from "expo-router";
-import { getAudit, type AuditDetail } from "../../../lib/api";
+import { getAudit, getAuditDebug, type AuditDetail } from "../../../lib/api";
 
 const STATUS_LABELS: Record<string, string> = {
   "processing": "⏳ Processing",
@@ -17,6 +17,7 @@ const STATUS_LABELS: Record<string, string> = {
 export default function AuditDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [audit, setAudit] = useState<AuditDetail | null>(null);
+  const [debugData, setDebugData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,6 +37,10 @@ export default function AuditDetailScreen() {
         } else {
           // Done processing, stop polling
           if (interval) clearInterval(interval);
+          // Fetch debug data (events + raw json) for logs/export
+          if (!debugData) {
+            getAuditDebug(id).then(setDebugData).catch(() => {});
+          }
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load");
@@ -119,6 +124,38 @@ export default function AuditDetailScreen() {
       data: audit.observations.map((obs, idx) => ({ type: "observation", obs, idx })),
     });
   }
+
+  // Section 4: CRM Summary (if final or retake)
+  if ((audit.status === "final" || audit.status === "retake_required") && audit.observations && audit.observations.length > 0) {
+    const totalFacings = audit.observations.reduce((sum, o) => sum + (o.facings || 0), 0);
+    const confirmedCount = audit.observations.filter(o => o.status === "confirmed" || o.match_method === "exact").length;
+    const unmatchedCount = audit.observations.filter(o => o.status === "unmatched" || !o.matched_sku_id).length;
+
+    sections.push({
+      title: "SET SUMMARY",
+      data: [{
+        type: "crm_summary",
+        totalFacings,
+        confirmedCount,
+        unmatchedCount,
+        totalCount: audit.observations.length,
+      }],
+    });
+  }
+
+  // Section 5: Pipeline Events (Debug Logs)
+  if (debugData && debugData.events && debugData.events.length > 0) {
+    sections.push({
+      title: "PIPELINE EVENTS (DEBUG)",
+      data: debugData.events.map((e: any, idx: number) => ({ type: "event", e, idx })),
+    });
+  }
+
+  // Section 6: Export Raw JSON
+  sections.push({
+    title: "EXPORT",
+    data: [{ type: "export_json", audit, debugData }],
+  });
 
   // Section 4: No Data State
   if ((audit.status === "final" || audit.status === "retake_required") && (!audit.observations || audit.observations.length === 0)) {
@@ -274,6 +311,58 @@ export default function AuditDetailScreen() {
             );
           }
 
+          if (item.type === "crm_summary") {
+            return (
+              <View style={styles.crmCard}>
+                <View style={styles.crmRow}>
+                  <Text style={styles.crmLabel}>Total Facings</Text>
+                  <Text style={styles.crmValue}>{item.totalFacings}</Text>
+                </View>
+                <View style={styles.crmRow}>
+                  <Text style={styles.crmLabel}>Items Detected</Text>
+                  <Text style={styles.crmValue}>{item.totalCount}</Text>
+                </View>
+                <View style={styles.crmRow}>
+                  <Text style={styles.crmLabel}>Confirmed Matches</Text>
+                  <Text style={[styles.crmValue, { color: "#16a34a" }]}>{item.confirmedCount}</Text>
+                </View>
+                <View style={styles.crmRow}>
+                  <Text style={styles.crmLabel}>Unmatched SKUs</Text>
+                  <Text style={[styles.crmValue, { color: item.unmatchedCount > 0 ? "#dc2626" : "#475569" }]}>{item.unmatchedCount}</Text>
+                </View>
+              </View>
+            );
+          }
+
+          if (item.type === "event") {
+            const e = item.e;
+            return (
+              <View style={styles.eventCard}>
+                <View style={styles.eventHeader}>
+                  <Text style={styles.eventType}>{e.event_type}</Text>
+                  <Text style={styles.eventTime}>{e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : ""}</Text>
+                </View>
+                {e.payload ? (
+                  <Text style={styles.eventPayload} numberOfLines={4}>
+                    {JSON.stringify(e.payload, null, 2)}
+                  </Text>
+                ) : null}
+              </View>
+            );
+          }
+
+          if (item.type === "export_json") {
+            const rawJson = JSON.stringify({ audit: item.audit, debug: item.debugData }, null, 2);
+            return (
+              <Pressable
+                style={styles.exportBtn}
+                onPress={() => Share.share({ message: rawJson })}
+              >
+                <Text style={styles.exportBtnText}>Share Raw JSON</Text>
+              </Pressable>
+            );
+          }
+
           return null;
         }}
         renderSectionHeader={({ section: { title } }) => (
@@ -343,4 +432,22 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 12, color: "#6b7280", textAlign: "center" },
 
   error: { color: "#dc2626", fontSize: 16, textAlign: "center" },
+
+  // CRM Summary Styles
+  crmCard: { backgroundColor: "#0f172a", borderRadius: 12, padding: 16, marginTop: 8 },
+  crmRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 6 },
+  crmLabel: { color: "#94a3b8", fontSize: 14, fontWeight: "500" },
+  crmValue: { color: "#f8fafc", fontSize: 16, fontWeight: "800" },
+
+  // Event Styles
+  eventCard: { backgroundColor: "#1e293b", borderRadius: 8, padding: 10, marginTop: 6 },
+  eventHeader: { flexDirection: "row", justifyContent: "space-between", marginBottom: 4 },
+  eventType: { color: "#3b82f6", fontSize: 11, fontWeight: "700", textTransform: "uppercase" },
+  eventTime: { color: "#64748b", fontSize: 10 },
+  eventPayload: { color: "#94a3b8", fontSize: 10, fontFamily: "monospace", lineHeight: 14 },
+
+  // Export Styles
+  exportBtn: { backgroundColor: "#3b82f6", paddingVertical: 12, borderRadius: 8, alignItems: "center", marginTop: 12 },
+  exportBtnText: { color: "#fff", fontSize: 14, fontWeight: "600" },
+
 });

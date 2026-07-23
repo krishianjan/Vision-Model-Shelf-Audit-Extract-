@@ -46,39 +46,48 @@ class Guardrail:
         # Production-grade semantic separation: store vs e-commerce vs non-alcohol vs garbage
         # Engineered to avoid CLIP confusion (e.g., "person holding" vs "bottle in hand")
         self.shelf_prompts = [
-            # =================================================================
-            # POSITIVE: Real-World Store Captures (Sales Rep Archetypes)
-            # =================================================================
-            "liquor store shelf set with spirits bottles",
-            "retail alcohol aisle facing rows of bottles",
-            "commercial beverage cooler door filled with beer and seltzers",
-            "liquor store promotional endcap display",
-            "freestanding case stack display of liquor boxes and bottles in an aisle",
-            "point of sale counter display with small nips or airline liquor bottles",
-            "close up of liquor bottle price tags on a shelf edge",
-            "organized backbar display of spirits bottles in a tavern or retail store",
+                    # =================================================================
+                    # POSITIVE: Real-World Store Captures (Sales Rep Archetypes)
+                    # =================================================================
+                    "liquor store shelf set with spirits bottles",
+                    "retail alcohol aisle facing rows of bottles",
+                    "commercial beverage cooler door filled with beer and seltzers",
+                    "liquor store promotional endcap display",
+                    "freestanding case stack display of liquor boxes and bottles in an aisle",
+                    "point of sale counter display with small nips or airline liquor bottles",
+                    "close up of liquor bottle price tags on a shelf edge",
+                    "organized backbar display of spirits bottles in a tavern or retail store",
 
-            # =================================================================
-            # POSITIVE: E-Commerce & Web Captures (Google Images Archetypes)
-            # =================================================================
-            "clean e-commerce product listing shot of an alcohol bottle on pure white background",
-            "isolated studio photography of a spirits bottle with high contrast lighting",
-            "digital mockup or transparent PNG of a liquor bottle packaging",
-            "close up macro photograph of a pristine wine or spirits bottle label",
-            "bright high-exposure product image of a single alcohol bottle",
-            "manufacturer stock photo of a branded liquor bottle",
+                    # =================================================================
+                    # POSITIVE: Single Bottle Close-Ups (Common Internet/Testing Images)
+                    # =================================================================
+                    "single glass whiskey bottle on a table close up photo",
+                    "a vodka bottle photographed from above on a counter",
+                    "one dark liquor bottle standing alone on a surface",
+                    "professional photography of a single spirit bottle isolated",
+                    "a tequila or rum bottle snapped with a phone camera in a room",
 
-            # =================================================================
-            # POSITIVE: Hand-held single bottle (real rep scenario)
-            # =================================================================
-            "hand holding a vodka bottle close to camera",
-            "person holding liquor bottle for shelf audit",
-            "close-up of alcohol bottle held in hand",
-            "single spirit bottle held up against store shelf",
+                    # =================================================================
+                    # POSITIVE: E-Commerce & Web Captures (Google Images Archetypes)
+                    # =================================================================
+                    "clean e-commerce product listing shot of an alcohol bottle on pure white background",
+                    "isolated studio photography of a spirits bottle with high contrast lighting",
+                    "digital mockup or transparent PNG of a liquor bottle packaging",
+                    "close up macro photograph of a pristine wine or spirits bottle label",
+                    "bright high-exposure product image of a single alcohol bottle",
+                    "manufacturer stock photo of a branded liquor bottle",
 
-            # =================================================================
-            # NEGATIVE: Non-Alcoholic Beverages (The Traps)
-            # =================================================================
+                    # =================================================================
+                    # POSITIVE: Hand-held single bottle (real rep scenario)
+                    # =================================================================
+                    "hand holding a whiskey bottle close to camera",
+                    "person holding a liquor bottle for shelf audit",
+                    "close-up of an alcohol bottle held in hand",
+                    "single spirit bottle held up against store shelf",
+
+                    # =================================================================
+                    # NEGATIVE: Non-Alcoholic Beverages (The Traps)
+                    # =================================================================
             "grocery shelf stacked with plastic water bottles",
             "soda pop and carbonated juice cans on display",
             "energy drinks, sports drinks, or liquid mixers on retail racks",
@@ -171,6 +180,10 @@ class Guardrail:
                 alcohol_type="alcohol",
                 alcohol_confidence=0.85,
             )
+
+        # YOLO found exactly 1 bottle — don't reject outright, try CLIP first
+        if bottle_count and bottle_count == 1:
+            print(f"[GATE] YOLO found 1 container — deferring to CLIP for single-bottle check")
 
         # Stage 2: YOLO uncertain/unavailable → Use CLIP as fallback
         t2 = time.perf_counter()
@@ -278,9 +291,9 @@ class Guardrail:
                 img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
                 sims = (img_feat @ self.clip_text_feats.T).squeeze(0).cpu().numpy()
 
-            # Split: first 10 = positive (alcohol), last 8 = negative (non-alcohol)
-            pos_sims = sims[:10]
-            neg_sims = sims[10:]
+            # Split: first 23 = positive (alcohol/spirits), last 17 = negative (non-alcohol/garbage)
+            pos_sims = sims[:23]
+            neg_sims = sims[23:]
 
             # ENSEMBLE: Average each group separately
             avg_pos = float(np.mean(pos_sims))
@@ -288,9 +301,10 @@ class Guardrail:
 
             print(f"[CLIP] avg_pos={avg_pos:.3f}, avg_neg={avg_neg:.3f}, gap={avg_pos-avg_neg:+.3f}")
 
-            # REJECT only if CLEARLY non-alcohol (avg_pos < 0.15)
-            # Everything else passes to Qwen for final determination
-            if avg_pos < 0.10:
+            # REJECT only if CLEARLY non-alcohol (avg_pos < 0.05)
+            # Single bottle images often score 0.05-0.15 on CLIP because they're
+            # not "retail aisle" scenes — don't penalize them for that
+            if avg_pos < 0.05:
                 return {
                     "verdict": "reject",
                     "category": "non_alcohol",

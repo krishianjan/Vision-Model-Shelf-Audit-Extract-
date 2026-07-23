@@ -15,6 +15,9 @@ class ObservationOut(BaseModel):
     matched_sku_id: UUID | None
     sku_guess_text: str | None
     brand_read: str | None
+    visual_brand_guess: str | None = None
+    visual_brand_confidence: float | None = None
+    product_read: str | None = None
     size_read: str | None
     facings: int | None
     shelf_position: str | None
@@ -25,6 +28,15 @@ class ObservationOut(BaseModel):
     match_method: str | None
     match_similarity: float | None
     notes: str | None
+    # Visual cues
+    bottle_shape: str | None = None
+    glass_tint: str | None = None
+    cap_type: str | None = None
+    label_color: str | None = None
+    label_design: str | None = None
+    damage_flags: str | None = None
+    stock_level: str | None = None
+    alcohol_subcategory: str | None = None
     created_at: datetime
 
 

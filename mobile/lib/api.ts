@@ -45,11 +45,15 @@ export interface ObservationEnrichment {
 }
 export interface Observation {
   id: string; matched_sku_id: string | null; sku_guess_text: string | null;
-  brand_read: string | null; size_read: string | null; facings: number | null;
+  brand_read: string | null; visual_brand_guess: string | null; visual_brand_confidence: number | null;
+  product_read: string | null; size_read: string | null; facings: number | null;
   shelf_position: string | null; price_value: number | null; price_confidence: number | null;
   field_confidence: FieldConfidence; status: string; match_method: string | null;
-  match_similarity: number | null; notes: string | null; created_at: string;
-  enrichment: ObservationEnrichment;
+  notes: string | null; created_at: string;
+  // Visual cues
+  bottle_shape: string | null; glass_tint: string | null; cap_type: string | null;
+  label_color: string | null; label_design: string | null; damage_flags: string | null;
+  stock_level: string | null; alcohol_subcategory: string | null;
 }
 export interface AuditSummary {
   id: string; account_id: string; account_name: string | null;
@@ -68,6 +72,7 @@ export const getAccounts = () => req<Account[]>("GET", "/accounts");
 export const getAudits = (account_id?: string) =>
   req<AuditSummary[]>("GET", `/audits${account_id ? `?account_id=${account_id}` : ""}`);
 export const getAudit = (id: string) => req<AuditDetail>("GET", `/audits/${id}`);
+export const getAuditDebug = (id: string) => getJSON(`/audits/${id}/debug`);
 export const patchObservation = (audit_id: string, obs_id: string, patch: { status: string; notes?: string }) =>
   req("PATCH", `/audits/${audit_id}/observations/${obs_id}`, patch);
 

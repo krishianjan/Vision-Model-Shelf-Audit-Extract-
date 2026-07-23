@@ -323,3 +323,50 @@ async def cancel_audit_processing(
         "audit_id": str(audit_id),
         "message": "Processing stopped. Background task will exit on next event."
     }
+
+
+@router.get("/{audit_id}/debug")
+async def get_audit_debug(
+    request: Request,
+    audit_id: UUID,
+    user: AuthUser = Depends(get_current_user),
+):
+    """Return raw pipeline events and full audit JSON for debugging/export."""
+    db = request.app.state.db
+    async with db.acquire() as conn:
+        audit = await conn.fetchrow(
+            """SELECT * FROM shelf_audits WHERE id = $1 AND org_id = $2""",
+            audit_id, user.org_id,
+        )
+        if not audit:
+            raise HTTPException(status_code=404, detail="Audit not found")
+
+        obs = await conn.fetch(
+            "SELECT * FROM audit_observations WHERE audit_id = $1 ORDER BY created_at",
+            audit_id,
+        )
+        events = await conn.fetch(
+            "SELECT event_type, payload, created_at FROM audit_events WHERE audit_id = $1 ORDER BY created_at",
+            audit_id,
+        )
+
+    def safe_json(d):
+        if isinstance(d, str):
+            try:
+                return json.loads(d)
+            except:
+                return d
+        return d
+
+    return {
+        "audit": safe_json(dict(audit)),
+        "observations": [dict(o) for o in obs],
+        "events": [
+            {
+                "event_type": e["event_type"],
+                "payload": safe_json(e["payload"]),
+                "timestamp": e["created_at"].isoformat() if e["created_at"] else None,
+            }
+            for e in events
+        ],
+    }

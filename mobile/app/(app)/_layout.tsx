@@ -15,11 +15,11 @@ export default function AppLayout() {
       }}
     >
       <Tabs.Screen
-        name="dashboard"
+        name="accounts"
         options={{
-          title: "Dashboard",
-          headerTitle: "Your Dashboard",
-          tabBarIcon: ({ color, size }) => <Ionicons name="stats-chart-outline" size={size} color={color} />,
+          title: "Accounts",
+          headerTitle: "Store Accounts",
+          tabBarIcon: ({ color, size }) => <Ionicons name="business-outline" size={size} color={color} />,
         }}
       />
       <Tabs.Screen

@@ -54,6 +54,17 @@ class CalibratedObservation:
     match_method: str
     match_similarity: float
     obs_status: str        # final status after calibration (maps to audit_observations.status)
+    # Visual cue fields (survive when text is unreadable)
+    bottle_shape: str | None = None
+    glass_tint: str | None = None
+    cap_type: str | None = None
+    label_color: str | None = None
+    label_design: str | None = None
+    damage_flags: str | None = None
+    visual_brand_guess: str | None = None
+    visual_brand_confidence: float = 0.0
+    stock_level: str | None = None
+    alcohol_subcategory: str | None = None
     judge_notes: str | None = None
 
     def to_db_dict(self) -> dict:
@@ -62,7 +73,7 @@ class CalibratedObservation:
 
         return {
             "matched_sku_id": self.matched_sku_id,
-            "sku_guess_text": f"{self.brand_read or ''} {self.product_read or ''}".strip() or None,
+            "sku_guess_text": f"{self.brand_read or self.visual_brand_guess or ''} {self.product_read or ''}".strip() or None,
             "brand_read": self.brand_read,
             "size_read": self.size_read,
             "facings": self.facings,
@@ -74,6 +85,17 @@ class CalibratedObservation:
             "match_method": self.match_method,
             "match_similarity": self.match_similarity,
             "notes": self.judge_notes or self.notes,
+            # Visual cue fields
+            "bottle_shape": self.bottle_shape,
+            "glass_tint": self.glass_tint,
+            "cap_type": self.cap_type,
+            "label_color": self.label_color,
+            "label_design": self.label_design,
+            "damage_flags": self.damage_flags,
+            "visual_brand_guess": self.visual_brand_guess,
+            "visual_brand_confidence": self.visual_brand_confidence,
+            "stock_level": self.stock_level,
+            "alcohol_subcategory": self.alcohol_subcategory,
         }
 
 
@@ -338,6 +360,17 @@ class Judge:
                 match_method=match.match_method,
                 match_similarity=match.match_similarity,
                 obs_status=obs_status,
+                # Visual cue fields — pass through from VLM observation
+                bottle_shape=obs.bottle_shape,
+                glass_tint=obs.glass_tint,
+                cap_type=obs.cap_type,
+                label_color=obs.label_color,
+                label_design=obs.label_design,
+                damage_flags=obs.damage_flags,
+                visual_brand_guess=obs.visual_brand_guess,
+                visual_brand_confidence=obs.visual_brand_confidence,
+                stock_level=obs.stock_level,
+                alcohol_subcategory=obs.alcohol_subcategory,
             ))
 
         # Step 2: call LLM for judge_notes (non-fatal)

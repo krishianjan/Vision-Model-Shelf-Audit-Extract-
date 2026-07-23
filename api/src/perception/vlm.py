@@ -41,6 +41,17 @@ class Observation(BaseModel):
     ] = "confirmed"
     field_confidence: dict[str, float] = Field(default_factory=dict)
     notes: str | None = None
+    # ── Visual cues (survive even when label text is unreadable) ──
+    bottle_shape: str | None = None       # tall_neck|short_squat|handle|flask|wine|can|custom|unknown
+    glass_tint: str | None = None        # clear|green|brown|blue|frosted|opaque|unknown
+    cap_type: str | None = None          # screw|cork|crown|plastic|t_top|unknown
+    label_color: str | None = None       # dominant color, e.g. "black"
+    label_design: str | None = None       # minimal|ornate|vintage|modern|bold_text|illustrated|unknown
+    damage_flags: str | None = None      # none|torn_label|dust|broken_seal|faded|dented
+    visual_brand_guess: str | None = None     # brand inferred from visual cues, NOT label text
+    visual_brand_confidence: float = 0.0       # 0-1 confidence for visual brand guess
+    stock_level: str | None = None       # full|partial|low|empty|unknown
+    alcohol_subcategory: str | None = None    # e.g. single_malt_scotch, silver_tequila, ipa
 
 
 class VLMExtractionResult(BaseModel):
@@ -102,6 +113,15 @@ For EVERY visible bottle, transcribe the literal readable text on the label.
 Do NOT skip single bottles. Do NOT require a retail shelf context.
 Do not attempt brand identification — only report what you can literally read.
 
+ADDITIONALLY — capture visual brand cues that survive even when label text is unreadable:
+- bottle_shape: "tall_neck" | "short_squat" | "handle" | "flask" | "wine" | "can" | "custom" | "unknown"
+- glass_tint: "clear" | "green" | "brown" | "blue" | "frosted" | "opaque" | "unknown"
+- cap_type: "screw" | "cork" | "crown" | "plastic" | "t_top" | "unknown"
+- label_color_dominant: e.g. "red", "black", "white", "gold", "blue", "green", "unknown"
+- label_design: "minimal" | "ornate" | "vintage" | "modern" | "bold_text" | "illustrated" | "unknown"
+- damage_visible: "none" | "torn_label" | "dust" | "broken_seal" | "faded" | "dented"
+These visual cues are CRITICAL fallbacks — they MUST be filled for every bottle even when label text is unreadable.
+
 Output JSON matching this exact schema:
 {{
   "image_quality_degraded": false,
@@ -114,7 +134,13 @@ Output JSON matching this exact schema:
       "price_text": "[price number if visible, e.g., '19.99']",
       "legibility": "fully_readable | partial | unreadable",
       "region": "left | center | right | unknown",
-      "shelf_row": "top | eye_level | reach | stoop | bottom | endcap | cooler_door | hand_hold | unknown"
+      "shelf_row": "top | eye_level | reach | stoop | bottom | endcap | cooler_door | hand_hold | unknown",
+      "bottle_shape": "tall_neck | short_squat | handle | flask | wine | can | custom | unknown",
+      "glass_tint": "clear | green | brown | blue | frosted | opaque | unknown",
+      "cap_type": "screw | cork | crown | plastic | t_top | unknown",
+      "label_color_dominant": "[color name or unknown]",
+      "label_design": "minimal | ornate | vintage | modern | bold_text | illustrated | unknown",
+      "damage_visible": "none | torn_label | dust | broken_seal | faded | dented"
     }}
   ]
 }}"""
@@ -134,8 +160,88 @@ If this image contains NON-ALCOHOLIC beverages (water, juice, soda, coffee, tea)
 Your task (PASS 2): Extract bottle data with GROUNDED CONFIDENCE SCORES based on pixel evidence.
 The image source may be a highly polished e-commerce product shot (with ultra-bright, studio-white backgrounds)
 OR a raw, unevenly lit physical store shelf captured via mobile camera. Adapt to both environments.
-Only fill fields where you can PROVE the value from the image. NULL = cannot prove.
 
+═══════════════════════════════════════════════════════════
+TIERED BRAND RECOGNITION SYSTEM (CRITICAL — replaces single-tier text-only)
+═══════════════════════════════════════════════════════════
+Every observation MUST go through all 3 tiers. Fill whatever you can.
+
+TIER 1 — TEXT (brand_read + field_confidence.brand):
+- Brand name readable from label text → fill brand_read, confidence 0.85+
+- Partially readable (some chars blurry) → confidence 0.70-0.84
+- Unreadable text → brand_read = NULL, proceed to TIER 2
+
+TIER 2 — VISUAL (visual_brand_guess + visual_brand_confidence):
+- Label unreadable BUT bottle is visually recognizable from shape, color, cap, label design
+- Use your knowledge of iconic bottle shapes and label color schemes:
+  * Tall clear bottle + black label + screw cap → likely Absolut Vodka
+  * Green bottle + red star → likely Heineken
+  * Brown glass + short neck + black label → likely Jack Daniel's
+  * Crystal skull bottle → likely Crystal Head Vodka
+  * Green/brown tint + embossed crest + tall → likely Bombay Sapphire or Tanqueray
+  * Tall frosted bottle + bold typography → likely Ciroc or Grey Goose
+  * Wine bottle shape + cork + chateau label → wine (fill alcohol_subcategory)
+  * Slim can + bright colors → likely White Claw/Truly/High Noon
+- Set visual_brand_guess to your best guess, visual_brand_confidence honestly:
+  * 0.80+ = unmistakable iconic design (e.g. crystal skull, green star)
+  * 0.60-0.79 = strong visual match but could be 1-2 alternatives
+  * 0.40-0.59 = partial match (right category, uncertain brand)
+  * <0.40 = leave NULL, you truly cannot tell
+- This does NOT override the honesty contract for brand_read — if text is unreadable, brand_read stays NULL
+- visual_brand_guess is SEPARATE data that helps downstream matching
+
+TIER 3 — UNKNOWN:
+- Cannot identify from text or visual cues → brand_read=NULL, visual_brand_guess=NULL, legibility="unreadable"
+- STILL fill all visual cue fields (bottle_shape, glass_tint, etc.) and stock_level
+
+═══════════════════════════════════════════════════════════
+VISUAL CUE EXTRACTION (MANDATORY for EVERY observation)
+═══════════════════════════════════════════════════════════
+Even when label text is fully unreadable, you MUST still fill:
+- bottle_shape: "tall_neck" | "short_squat" | "handle" | "flask" | "wine" | "can" | "custom" | "unknown"
+  * tall_neck: standard spirits bottle, long neck
+  * short_squat: wide round bottle (e.g. Patron)
+  * handle: 1.75L with handle
+  * flask: flat rectangular (e.g. Johnnie Walker)
+  * wine: tall with sloped shoulders + cork
+  * can: aluminum can (beer/seltzer)
+- glass_tint: "clear" | "green" | "brown" | "blue" | "frosted" | "opaque" | "unknown"
+- cap_type: "screw" | "cork" | "crown" | "plastic" | "t_top" | "unknown"
+  * crown = beer bottle cap
+  * t_top = T-shaped stopper (premium spirits)
+- label_color: dominant color of label (e.g. "black", "white", "red", "gold", "blue")
+- label_design: "minimal" | "ornate" | "vintage" | "modern" | "bold_text" | "illustrated" | "unknown"
+- damage_flags: "none" | "torn_label" | "dust" | "broken_seal" | "faded" | "dented"
+  * Combine with comma if multiple, e.g. "dust,torn_label"
+These survive when text doesn't — they are your fallback for brand identification.
+
+═══════════════════════════════════════════════════════════
+STOCK LEVEL ESTIMATION
+═══════════════════════════════════════════════════════════
+- "full": >80% of facing space occupied by bottles
+- "partial": 20-80% occupied
+- "low": <20% occupied (1-2 bottles left)
+- "empty": 0 bottles but shelf tag/price label still visible
+- "unknown": cannot determine (single bottle photo, e-commerce shot)
+
+═══════════════════════════════════════════════════════════
+ALCOHOL SUBCATEGORY (more specific than alcohol_type)
+═══════════════════════════════════════════════════════════
+Fill alcohol_subcategory when you can determine it:
+- Spirits: single_malt_scotch, blended_scotch, irish_whiskey, bourbon, tennessee_whiskey,
+  canadian_whisky, japanese_whisky, silver_tequila, blanco_tequila, reposado_tequila,
+  anejo_tequila, extra_anejo_tequila, white_rum, dark_rum, spiced_rum, london_dry_gin,
+  old_tom_gin, american_gin, unflavored_vodka, flavored_vodka
+- Wine: cabernet_sauvignon, chardonnay, sauvignon_blanc, pinot_noir, merlot, rose,
+  sparkling, prosecco, champagne, moscato
+- Beer: lager, pilsner, ipa, wheat, stout, porter, belgian, amber
+- RTD: hard_seltzer, hard_tea, hard_lemonade
+- Liqueur: coffee_liqueur, cream_liqueur, amaro, aperitivo
+If uncertain, set to NULL.
+
+═══════════════════════════════════════════════════════════
+STANDARD FIELD EXTRACTION (unchanged rules)
+═══════════════════════════════════════════════════════════
 EXTRACTION STRATEGY:
 1. Identify each distinct alcoholic item visible in the frame.
 2. Determine the exact Brand and SKU details (Name, Flavor, Liquid Volume/Size like 750ml, 1.75L, 20oz).
@@ -148,7 +254,7 @@ EXTRACTION RULES (MANDATORY - NON-NEGOTIABLE):
    - 0.95+: Brand name fully readable, crisp text, no occlusion
    - 0.85-0.94: Brand visible but 1-2 chars slightly unclear or minor glare
    - 0.70-0.84: Brand partially visible, some letters cut off or blurry, but identifiable
-   - <0.70: Cannot read brand text clearly → SET brand_read = NULL
+   - <0.70: Cannot read brand text clearly → SET brand_read = NULL (proceed to TIER 2 visual)
 
 2. SIZE confidence scoring:
    - 0.95+: "750ml" or "1.5L" text fully visible and clear (common in e-commerce)
@@ -174,20 +280,23 @@ EXTRACTION RULES (MANDATORY - NON-NEGOTIABLE):
    - unreadable: Label mostly obscured, intense glare, or too blurry to read
 
 CRITICAL RULES (NON-NEGOTIABLE):
-- NEVER guess or interpolate missing values using outside knowledge
-- NEVER use prior brand knowledge to "fix" a blurry label
-- If field confidence < 0.70 → ALWAYS SET TO NULL (not 0, not "", null)
+- NEVER guess or interpolate TEXT fields (brand_read, product_read, size_read, price_read)
+- visual_brand_guess is ALLOWED to use visual knowledge — it is SEPARATE from brand_read
+- If field confidence < 0.70 → ALWAYS SET THAT TEXT FIELD TO NULL
 - Each field is independently scored: one field can be NULL while others are filled
 - If price_read is NULL → also set price_confidence to NULL/0
 - NEVER "correct" or normalize text: transcribe EXACTLY what you see on the label
-- If a label is blurry beyond recognition, do not try to fix it → set to null
+- Visual cue fields (bottle_shape, glass_tint, cap_type, label_color, label_design, damage_flags,
+  stock_level) are NOT subject to the 0.70 confidence threshold — fill them ALWAYS
 
 IMAGE DEGRADATION CONTEXT:
 If the image has glare, bad lighting, or angle issues, you MUST:
-1. Reduce confidence for ALL fields by 0.15
+1. Reduce confidence for ALL TEXT fields by 0.15
 2. Set image_quality_degraded=true
 3. Note the specific degradation in degradation_reason
-4. If glare covers >30% of a bottle label, set ALL field confidences < 0.70 (NULL)
+4. Visual cue fields remain unaffected by degradation — still fill them
+5. If glare covers >30% of a bottle label, set ALL TEXT field confidences < 0.70 (NULL)
+   but STILL fill visual cues and visual_brand_guess
 
 NEAR-IDENTICAL SKU DIFFERENTIATION:
 When multiple bottles look similar (e.g., same brand, different flavors):
@@ -204,7 +313,9 @@ Output JSON matching this exact schema:
   "extraction_confidence": 0.0,  // How confident are you in the extracted data?
   "observations": [
     {{
-      "brand_read": "[brand name from label, or null if unreadable]",
+      "brand_read": "[brand name from label TEXT, or null if unreadable]",
+      "visual_brand_guess": "[brand inferred from VISUAL cues, or null]",
+      "visual_brand_confidence": 0.0,  // 0-1, confidence in visual brand guess
       "product_read": "[product type from label, or null if unreadable]",
       "size_read": "[volume + unit if visible, e.g., '750ml']",
       "legibility": "fully_readable | partial | unreadable",
@@ -218,6 +329,14 @@ Output JSON matching this exact schema:
         "facings": [0.0-1.0],
         "price": [0.0-1.0]
       }},
+      "bottle_shape": "tall_neck | short_squat | handle | flask | wine | can | custom | unknown",
+      "glass_tint": "clear | green | brown | blue | frosted | opaque | unknown",
+      "cap_type": "screw | cork | crown | plastic | t_top | unknown",
+      "label_color": "[dominant color, or unknown]",
+      "label_design": "minimal | ornate | vintage | modern | bold_text | illustrated | unknown",
+      "damage_flags": "none | torn_label | dust | broken_seal | faded | dented",
+      "stock_level": "full | partial | low | empty | unknown",
+      "alcohol_subcategory": "[e.g. single_malt_scotch, silver_tequila, ipa, or null]",
       "notes": "[optional]"
     }}
   ],
@@ -612,6 +731,8 @@ def _parse_observations(pass2: dict) -> list[Observation]:
             obs_dict["size_read"] = size_read
             obs_dict["price_read"] = price_read
             obs_dict["facings"] = facings
+            if "visual_brand_confidence" not in obs_dict or obs_dict.get("visual_brand_confidence") is None:
+                obs_dict["visual_brand_confidence"] = 0.0
 
             result.append(Observation(**obs_dict))
         except Exception:

@@ -27,6 +27,15 @@ from src.perception.enhance import enhance_image
 from src.grounding.matcher import SKUMatcher, MatchResult
 from src.grounding.judge import Judge, JudgeResult, CalibratedObservation
 
+VALID_FIXTURE_TYPES = frozenset({"gondola", "cooler", "endcap", "floor_display", "unknown"})
+
+def _normalize_fixture_type(raw: str | None) -> str:
+    """Map VLM fixture_type to a DB-valid value."""
+    if raw is None:
+        return "unknown"
+    cleaned = raw.strip().lower()
+    return cleaned if cleaned in VALID_FIXTURE_TYPES else "unknown"
+
 
 def _ser(obj) -> dict:
     """Recursively convert dataclasses / Pydantic models to dicts for state storage.
@@ -323,13 +332,34 @@ class ShelfAuditAgent:
 
         async with self._db.acquire() as conn:
             match_results = []
+            visual_match_count = 0
             for obs in observations:
+                brand = obs.get("brand_read")
+                visual_guess = obs.get("visual_brand_guess")
+                visual_conf = float(obs.get("visual_brand_confidence", 0.0))
+
+                # Try text brand first
                 mr = await self._matcher.match(
                     conn,
-                    obs.get("brand_read"),
+                    brand,
                     obs.get("size_read"),
                     obs.get("product_read"),
                 )
+
+                # If text brand failed AND visual brand guess is confident enough, try it
+                if mr.match_method == "unresolved" and visual_guess and visual_conf >= 0.60:
+                    mr_visual = await self._matcher.match(
+                        conn,
+                        visual_guess,
+                        obs.get("size_read"),
+                        obs.get("product_read"),
+                    )
+                    if mr_visual.match_method != "unresolved":
+                        mr_visual.match_method = f"visual_{mr_visual.match_method}"
+                        match_results.append(_ser(mr_visual))
+                        visual_match_count += 1
+                        continue
+
                 match_results.append(_ser(mr))
 
         return {
@@ -338,6 +368,7 @@ class ShelfAuditAgent:
                 "total": len(match_results),
                 "matched": sum(1 for m in match_results if m.get("matched_sku_id")),
                 "unresolved": sum(1 for m in match_results if not m.get("matched_sku_id")),
+                "visual_matches": visual_match_count,
             }}],
         }
 
@@ -440,7 +471,7 @@ class ShelfAuditAgent:
                     """,
                     audit_id,
                     status,
-                    vlm_dict.get("fixture_type"),
+                    _normalize_fixture_type(vlm_dict.get("fixture_type")),
                     json.dumps(quality_dict),
                     model_version,
                     total_latency,
@@ -486,8 +517,11 @@ class ShelfAuditAgent:
                           facings, shelf_position, legibility, object_type,
                           price_value, price_confidence,
                           field_confidence, status,
-                          match_method, match_similarity, notes, org_id
-                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17,$18,$19,$20)
+                          match_method, match_similarity, notes, org_id,
+                          bottle_shape, glass_tint, cap_type, label_color,
+                          label_design, damage_flags, visual_brand_guess,
+                          visual_brand_confidence, stock_level, alcohol_subcategory
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
                         """,
                         uuid4(), audit_id,
                         (obs["matched_sku_id"] if isinstance(obs["matched_sku_id"], UUID)
@@ -504,6 +538,17 @@ class ShelfAuditAgent:
                         obs.get("obs_status", "confirmed"),
                         obs.get("match_method"), obs.get("match_similarity"),
                         obs.get("notes"), org_id,
+                        # Visual cue fields (new)
+                        obs.get("bottle_shape"),
+                        obs.get("glass_tint"),
+                        obs.get("cap_type"),
+                        obs.get("label_color"),
+                        obs.get("label_design"),
+                        obs.get("damage_flags"),
+                        obs.get("visual_brand_guess"),
+                        obs.get("visual_brand_confidence", 0.0),
+                        obs.get("stock_level"),
+                        obs.get("alcohol_subcategory"),
                     )
 
         return {}
