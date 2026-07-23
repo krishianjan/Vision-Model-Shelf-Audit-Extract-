@@ -173,17 +173,14 @@ TIER 1 — TEXT (brand_read + field_confidence.brand):
 
 TIER 2 — VISUAL (visual_brand_guess + visual_brand_confidence):
 - Label unreadable BUT bottle is visually recognizable from shape, color, cap, label design
-- Use your knowledge of iconic bottle shapes and label color schemes:
-  * Tall clear bottle + black label + screw cap → likely Absolut Vodka
-  * Green bottle + red star → likely Heineken
-  * Brown glass + short neck + black label → likely Jack Daniel's
-  * Crystal skull bottle → likely Crystal Head Vodka
-  * Green/brown tint + embossed crest + tall → likely Bombay Sapphire or Tanqueray
-  * Tall frosted bottle + bold typography → likely Ciroc or Grey Goose
-  * Wine bottle shape + cork + chateau label → wine (fill alcohol_subcategory)
-  * Slim can + bright colors → likely White Claw/Truly/High Noon
-- Set visual_brand_guess to your best guess, visual_brand_confidence honestly:
-  * 0.80+ = unmistakable iconic design (e.g. crystal skull, green star)
+- Use your training knowledge of iconic bottle shapes and label color schemes
+- Examples of the METHOD (not a list to match):
+  * A uniquely shaped bottle (e.g. skull, square, flask) is recognizable by silhouette alone
+  * A distinct color + label pattern combination narrows the brand
+  * Cap style (cork vs screw vs crown) indicates category
+- Set visual_brand_guess to your best guess based on VISUAL evidence only
+- Set visual_brand_confidence honestly:
+  * 0.80+ = unmistakable iconic design (unique silhouette, no alternatives)
   * 0.60-0.79 = strong visual match but could be 1-2 alternatives
   * 0.40-0.59 = partial match (right category, uncertain brand)
   * <0.40 = leave NULL, you truly cannot tell

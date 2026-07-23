@@ -1,47 +1,51 @@
-# Vision Model Shelf Audit Extract — Complete Setup Guide
+# Vision Model Shelf Audit Extract
 
-## Table of Contents
-1. [Project Overview](#project-overview)
-2. [Architecture at a Glance](#architecture-at-a-glance)
-3. [Prerequisites](#prerequisites)
-4. [Database Setup (Supabase)](#database-setup-supabase)
-5. [Project Structure](#project-structure)
-6. [Installation Steps](#installation-steps)
-7. [Configuration (Environment Variables)](#configuration-environment-variables)
-8. [Running the System](#running-the-system)
-9. [ngrok Tunneling (Guest WiFi)](#ngrok-tunneling-guest-wifi)
-10. [Storage Setup (S3)](#storage-setup-s3)
-11. [Testing the Setup](#testing-the-setup)
-12. [Troubleshooting](#troubleshooting)
-13. [API Reference](#api-reference)
+A production-grade system for automated retail shelf auditing using multi-model vision extraction with hallucination control.
 
----
+## What It Does
 
-## Project Overview
-
-**Vision Model Shelf Audit Extract** is a production-grade system for automated retail shelf auditing using multi-model vision extraction with hallucination control.
-
-### What It Does
-- **Captures** shelf images from mobile devices
-- **Analyzes** image quality (blur, lighting, framing)
-- **Extracts** product information (brand, SKU, price, quantity)
-- **Validates** extractions against knowledge base and business rules
-- **Persists** verified data to database
+- **Captures** shelf images from mobile devices (Expo React Native)
+- **Analyzes** image quality (blur, lighting, framing) via OpenCV
+- **Gatekeeps** non-alcohol content via YOLO object detection + CLIP semantic verification
+- **Extracts** product information using a 3-tier brand recognition system (text → visual → unknown)
+- **Validates** extractions against a 154-SKU reference catalog using 3-tier RAG matching (exact → fuzzy → embedding)
+- **Calibrates** confidence scores via deterministic hard rules + LLM judge notes
+- **Persists** verified data to Supabase (Postgres 15+ with pgvector + pg_trgm)
 - **Displays** real-time insights in mobile and web dashboards
 
-### Tech Stack
-- **Backend:** Python FastAPI + LangGraph
-- **Frontend Mobile:** Expo React Native (TypeScript)
-- **Frontend Web:** React + Vite (TypeScript)
-- **Database:** Supabase (Postgres 15+)
-- **Cache:** Redis (Supabase managed)
-- **Storage:** S3-compatible (AWS S3 or similar)
-- **VLM Models:** Qwen2.5-VL (via OpenRouter), Groq fallback
-- **Judge Model:** DeepSeek (via OpenRouter)
-- **Embeddings:** CLIP (multi-modal)
-- **Tunneling:** ngrok (for guest WiFi)
+## Architecture
 
----
+```
+Mobile App (Expo) → API (FastAPI) → LangGraph Pipeline
+                                           │
+                    ┌──────────────────────┼──────────────────────┐
+                    │                      │                      │
+              Quality Gate            Guardrail              VLM Extract
+              (OpenCV)              (YOLO + CLIP)        (Qwen2.5-VL-72B)
+                    │                      │                      │
+                    └──────────┬───────────┘                      │
+                               │                                  │
+                         RAG Grounding                    Judge Calibration
+                         (3-tier match)                 (Hard Rules + DeepSeek)
+                               │                                  │
+                               └──────────┬───────────────────────┘
+                                          │
+                                    Persist to DB
+                                    (Supabase/Postgres)
+```
+
+## Tech Stack
+
+- **Backend:** Python FastAPI + LangGraph
+- **VLM:** Qwen2.5-VL-72B (OpenRouter) → Qwen3-32B fallback (Groq)
+- **Guardrail:** YOLOv11n (Ultralytics) + CLIP ViT-Base-Patch32 (OpenAI)
+- **Judge:** DeepSeek v3.2 (NVIDIA NIM) — notes only, hard rules are deterministic
+- **RAG:** pg_trgm fuzzy + rapidfuzz + BGE-small-en embeddings (pgvector)
+- **Mobile:** Expo React Native (TypeScript)
+- **Web:** React + Vite (TypeScript)
+- **Database:** Supabase (Postgres 15+ with pgvector + pg_trgm)
+- **Storage:** S3-compatible
+- **Tunneling:** ngrok (for guest WiFi)
 
 ## Quick Start (5 minutes)
 
@@ -56,7 +60,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env with Supabase + OpenRouter keys
+# Edit .env with Supabase + OpenRouter + Groq + NVIDIA NIM keys
 
 # 3. Setup mobile
 cd ../mobile
@@ -69,11 +73,13 @@ cd ../web
 npm install
 cp .env.example .env
 
-# 5. Create Supabase tables (see Database Setup section)
+# 5. Run database migrations + seed catalog
+cd ../db
+python seeds/products.py  # Seeds 154 SKUs with BGE embeddings
 
 # 6. Run (3 terminals)
 # Terminal 1 (Backend):
-cd api && source .venv/bin/activate && PYTHONPATH=. uvicorn src.main:app --port 8000
+cd api && source .venv/bin/activate && PYTHONPATH=. uvicorn src.main:app --port 8000 --reload
 
 # Terminal 2 (Mobile):
 cd mobile && npx expo start --clear
@@ -82,270 +88,148 @@ cd mobile && npx expo start --clear
 cd web && npm run dev
 ```
 
----
+## Key Features
 
-## Database Setup (Supabase)
+### 3-Tier Brand Recognition System
 
-### Step 1: Create Supabase Account
+The VLM pipeline uses a tiered approach to identify brands, even when labels are unreadable:
 
-1. Go to https://supabase.com → Sign up
-2. Create new project
-3. Get keys from Settings → API
-4. Copy `SUPABASE_URL` and `SUPABASE_KEY` to `.env`
+| Tier | Method | When | Fields Filled |
+|------|--------|------|---------------|
+| 1 | Text OCR | Label readable | `brand_read` + `field_confidence.brand` |
+| 2 | Visual cues | Label unreadable but bottle is iconic | `visual_brand_guess` + `visual_brand_confidence` |
+| 3 | Unknown | Cannot identify | Both null, still fills visual cues |
 
-### Step 2: Create Tables
+**Visual cue fields (always extracted, survive when text doesn't):**
+- `bottle_shape`: tall_neck, short_squat, handle, flask, wine, can, custom
+- `glass_tint`: clear, green, brown, blue, frosted, opaque
+- `cap_type`: screw, cork, crown, plastic, t_top
+- `label_color`: dominant color
+- `label_design`: minimal, ornate, vintage, modern, bold_text, illustrated
+- `damage_flags`: torn_label, dust, broken_seal, faded, dented
+- `stock_level`: full, partial, low, empty
+- `alcohol_subcategory`: single_malt_scotch, silver_tequila, ipa, cabernet, etc.
 
-Go to **SQL Editor** → Paste this:
+### Hallucination Control
 
-sql
-    -- Extensions
-    CREATE EXTENSION IF NOT EXISTS vector;
-    CREATE EXTENSION IF NOT EXISTS pg_trgm;
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;
-    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-    
-    -- 1. ORGANIZATIONS
-    CREATE TABLE IF NOT EXISTS accounts (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      org_id UUID NOT NULL,
-      name TEXT NOT NULL,
-      chain TEXT,
-      channel_type TEXT,
-      address TEXT,
-      latitude DOUBLE PRECISION,
-      longitude DOUBLE PRECISION,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    
-    -- 2. PRODUCT CATALOG (SKUs with vector embeddings for RAG)
-    CREATE TABLE IF NOT EXISTS products (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      brand TEXT NOT NULL,
-      product_name TEXT NOT NULL,
-      size_ml INTEGER,
-      pack_count INTEGER DEFAULT 1,
-      category TEXT,
-      upc TEXT,
-      embedding VECTOR(512),
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    
-    -- Index for pgvector similarity search
-    CREATE INDEX IF NOT EXISTS idx_products_embedding ON products USING ivfflat (embedding vector_cosine_ops);
-    
-    -- 3. SHELF AUDITS
-    CREATE TABLE IF NOT EXISTS shelf_audits (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      account_id UUID NOT NULL REFERENCES accounts(id),
-      org_id UUID NOT NULL,
-      captured_by UUID NOT NULL,
-      captured_at TIMESTAMPTZ NOT NULL,
-      received_at TIMESTAMPTZ DEFAULT now(),
-      fixture_type TEXT,
-      capture_quality JSONB,
-      status TEXT NOT NULL,
-      version INTEGER DEFAULT 1,
-      superseded_by UUID REFERENCES shelf_audits(id),
-      model_version TEXT,
-      latency_ms INTEGER,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    
-    -- 4. AUDIT OBSERVATIONS (Extracted product data with confidence)
-    CREATE TABLE IF NOT EXISTS audit_observations (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      audit_id UUID NOT NULL REFERENCES shelf_audits(id) ON DELETE CASCADE,
-      matched_sku_id UUID REFERENCES products(id),
-      sku_guess_text TEXT,
-      brand_read TEXT,
-      size_read TEXT,
-      facings INTEGER,
-      shelf_position TEXT,
-      price_value NUMERIC,
-      price_confidence NUMERIC,
-      field_confidence JSONB DEFAULT '{}'::jsonb,
-      status TEXT NOT NULL,
-      match_method TEXT,
-      match_similarity NUMERIC,
-      notes TEXT,
-      created_at TIMESTAMPTZ DEFAULT now(),
-      product_read TEXT,
-      flavor_variant TEXT,
-      legibility TEXT DEFAULT 'fully_readable',
-      object_type TEXT DEFAULT 'bottle',
-      org_id UUID
-    );
-    
-    -- 5. AUDIT IMAGES (Multiple shots per audit)
-    CREATE TABLE IF NOT EXISTS audit_images (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      audit_id UUID NOT NULL REFERENCES shelf_audits(id) ON DELETE CASCADE,
-      storage_path TEXT NOT NULL,
-      preview_path TEXT,
-      content_hash TEXT NOT NULL,
-      width_px INTEGER,
-      height_px INTEGER,
-      size_bytes INTEGER,
-      quality_score NUMERIC,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    
-    -- 6. PIPELINE EVENTS (Debug/audit trail)
-    CREATE TABLE IF NOT EXISTS audit_events (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      audit_id UUID NOT NULL REFERENCES shelf_audits(id) ON DELETE CASCADE,
-      event_type TEXT NOT NULL,
-      payload JSONB DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    
-    -- 7. GUARDRAIL REJECTIONS (Non-alcohol/selfie tracking)
-    CREATE TABLE IF NOT EXISTS guardrail_rejections (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      org_id UUID NOT NULL,
-      captured_by UUID NOT NULL,
-      account_id UUID,
-      storage_path TEXT NOT NULL,
-      content_hash TEXT,
-      category TEXT NOT NULL,
-      clip_confidence NUMERIC,
-      reason TEXT,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    
-    -- 8. STORE ENTRY CAPTURES (Geofenced check-in)
-    CREATE TABLE IF NOT EXISTS store_entry_captures (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      account_id UUID,
-      org_id UUID NOT NULL,
-      captured_by UUID NOT NULL,
-      storage_path TEXT NOT NULL,
-      ocr_store_name TEXT,
-      ocr_confidence NUMERIC,
-      latitude DOUBLE PRECISION,
-      longitude DOUBLE PRECISION,
-      captured_at TIMESTAMPTZ NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT now()
-    );
-    
-    -- 9. REVIEW QUEUE (Unmatched observations for manual verification)
-    CREATE TABLE IF NOT EXISTS review_queue (
-      observation_id UUID,
-      audit_id UUID,
-      account_id UUID,
-      captured_by UUID,
-      brand_read TEXT,
-      sku_guess_text TEXT,
-      status TEXT,
-      field_confidence JSONB,
-      min_confidence NUMERIC,
-      captured_at TIMESTAMPTZ
-    );
-    
-    -- Sample data
-    INSERT INTO products (brand, product_name, size_ml, category, upc) VALUES
-      ('Coca-Cola', 'Zero Sugar', 330, 'beverages', '049000028904'),
-      ('Pepsi', 'Diet Pepsi', 355, 'beverages', '012000001234'),
-      ('Sprite', 'Lemon Lime', 500, 'beverages', '049000028905');
-    
-    INSERT INTO accounts (org_id, name, chain, channel_type) VALUES
-      ('00000000-0000-0000-0000-000000000001', 'time sq Store', 'Reice', 'hypermarket'),
-      ('00000000-0000-0000-0000-000000000001', 'Deli Store', NULL, 'liquor_store'),
-      ('00000000-0000-0000-0000-000000000001', 'nyc Store', 'Metro', 'supermarket');
-    
+- **Honesty Contract:** VLM transcribes ONLY literal visible text. Brand_read requires readable label text.
+- **Hard Rules (deterministic):** Confidence < 0.70 → field set to NULL. Image quality < 0.6 caps all confidences.
+- **Visual brand guess is separate:** Does NOT override `brand_read`. Uses model's own visual knowledge, not injected brand data.
+- **No hardcoded brand data in VLM prompts:** Model uses its own training knowledge for visual recognition.
+- **RAG matching is reference-only:** 154-SKU catalog is used post-extraction for lookup, never fed to the VLM.
 
+### 3-Tier RAG SKU Matching
 
-Click **Run** to create all tables.
+| Tier | Method | Threshold | When |
+|------|--------|-----------|------|
+| 1 | Exact text match | 1.0 | Brand + size match normalized string |
+| 2 | Fuzzy (pg_trgm + rapidfuzz) | 0.65 | Typos, partial reads, OCR errors |
+| 3 | Embedding cosine (BGE-small + pgvector) | 0.75 | Semantic similarity |
+| 4 | Visual fallback | 0.60+ | If `visual_brand_guess` confident, tries RAG match on visual brand |
 
----
+### Guardrail (Fast Gatekeeper)
 
-## Installation
+- **YOLOv11n:** Detects bottle count + restricted objects (pizza, car, backpack)
+- **CLIP fallback:** 23 positive prompts (alcohol shelf/bottle) vs 17 negative (water, food, selfies)
+- **Single-bottle support:** YOLO with 1 container defers to CLIP — doesn't auto-reject
+- **Low threshold:** Only rejects if CLIP avg_pos < 0.05 (truly non-alcohol)
 
-### Backend (Python)
+### Product Catalog (154 SKUs)
 
-```bash
-cd api
-python -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-# .venv\Scripts\activate (Windows)
-
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-### Mobile (Expo)
-
-```bash
-cd mobile
-npm install -g expo-cli
-npm install
-cp .env.example .env
-```
-
-### Web (React)
-
-```bash
-cd web
-npm install
-cp .env.example .env
-```
-
----
+Reference-only database used for RAG matching after VLM extraction:
+- Vodka (12), Whiskey (26), Tequila (16), Rum (12), Gin (11)
+- Wine (15), Beer (11), RTD (7), Liqueur (14)
+- Each SKU has BGE-small-en embedding for semantic search
+- UPC codes for exact UPC lookup
+- No brand data injected into VLM prompts
 
 ## Environment Variables
 
 ### Backend (`api/.env`)
 
 ```env
-# Database
-DATABASE_URL=postgresql://postgres:PASSWORD@db.xxx.supabase.co:5432/postgres
+DATABASE_URL=postgresql+asyncpg://postgres:PASSWORD@db.xxx.supabase.co:5432/postgres
 SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_KEY=..............................
-
-# Auth
+SUPABASE_KEY=your-supabase-key
 JWT_SECRET_KEY=your-secret-key-min-32-chars
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-
-# VLM (OpenRouter - Qwen)
-OPENROUTER_API_KEY=-...
-OPENROUTER_VLM_MODEL=qwen/qwen-2.5-vl-72b-instruct
-
-# Judge (DeepSeek)
-DEEPSEEK_API_KEY=-...
-
-# Fallback (Groq)
-GROQ_API_KEY=_...
-
-# Storage
-SUPABASE_STORAGE_BUCKET=shelf-audits
-
-# App
+OPENROUTER_API_KEY=your-openrouter-key
+OPENROUTER_VLM_MODEL=qwen/qwen2.5-vl-72b-instruct
+GROQ_API_KEY=your-groq-key
+NVIDIA_NIM_API_KEY=your-nvidia-nim-key
+S3_STORAGE_BUCKET=shelf-audits
 ENVIRONMENT=development
-DEBUG=true
 ```
 
 ### Mobile (`mobile/.env`)
 
 ```env
-# Local network
-EXPO_PUBLIC_API_URL=http://1234567
-
-# OR ngrok tunnel
-EXPO_PUBLIC_API_URL=https://abc123-def456.ngrok-free.dev
+EXPO_PUBLIC_API_URL=http://localhost:8000
+EXPO_PUBLIC_SUPABASE_URL=http://localhost:54321
+EXPO_PUBLIC_SUPABASE_ANON_KEY=placeholder
 ```
 
-### Web (`web/.env`)
+## Database Schema
 
-```env
-VITE_API_URL=http://localhost:8000
-```
+### shelf_audits
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| account_id | UUID FK | Store account |
+| org_id | UUID | Organization |
+| captured_by | UUID | Rep who captured |
+| captured_at | TIMESTAMPTZ | When captured |
+| fixture_type | TEXT | gondola, cooler, endcap, floor_display, unknown |
+| capture_quality | JSONB | Image quality scores |
+| status | TEXT | processing, final, retake_required, guardrail_rejected, processing_failed |
+| model_version | TEXT | Which VLM model was used |
+| latency_ms | INTEGER | Total pipeline latency |
 
----
+### audit_observations
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| audit_id | UUID FK | Parent audit |
+| matched_sku_id | UUID FK | Matched product (null = unmatched) |
+| sku_guess_text | TEXT | Best text guess (brand_read or visual_brand_guess) |
+| brand_read | TEXT | Brand from label text (null if unreadable) |
+| visual_brand_guess | TEXT | Brand from visual cues (null if unidentifiable) |
+| visual_brand_confidence | NUMERIC | 0-1 confidence in visual guess |
+| product_read | TEXT | Product type from label |
+| size_read | TEXT | Volume from label |
+| facings | INTEGER | Count of bottles in group |
+| shelf_position | TEXT | top, eye_level, reach, stoop, bottom, endcap, cooler_door |
+| price_value | NUMERIC | Extracted price |
+| price_confidence | NUMERIC | 0-1 price confidence |
+| field_confidence | JSONB | Per-field confidence scores |
+| status | TEXT | confirmed, partial, low_confidence, unmatched, occluded, unreadable |
+| match_method | TEXT | exact, fuzzy, embedding, unresolved, visual_exact, visual_fuzzy |
+| match_similarity | NUMERIC | 0-1 RAG match similarity |
+| bottle_shape | TEXT | tall_neck, short_squat, handle, flask, wine, can, custom |
+| glass_tint | TEXT | clear, green, brown, blue, frosted, opaque |
+| cap_type | TEXT | screw, cork, crown, plastic, t_top |
+| label_color | TEXT | Dominant label color |
+| label_design | TEXT | minimal, ornate, vintage, modern, bold_text, illustrated |
+| damage_flags | TEXT | torn_label, dust, broken_seal, faded, dented |
+| stock_level | TEXT | full, partial, low, empty, unknown |
+| alcohol_subcategory | TEXT | single_malt_scotch, silver_tequila, ipa, cabernet, etc |
+
+### products
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| brand | TEXT | Brand name |
+| product_name | TEXT | Product/variant name |
+| size_ml | INTEGER | Volume in ml |
+| pack_count | INTEGER | Pack size (beers) |
+| category | TEXT | vodka, whiskey, tequila, rum, gin, wine, beer, rtd, liqueur, other |
+| upc | TEXT UNIQUE | Barcode |
+| embedding | VECTOR(384) | BGE-small-en embedding |
+| bottle_shape | TEXT | (future: for visual matching) |
+| glass_tint | TEXT | (future: for visual matching) |
 
 ## Running
 
 ### Terminal 1: Backend
-
 ```bash
 cd api
 source .venv/bin/activate
@@ -353,204 +237,55 @@ PYTHONPATH=. uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### Terminal 2: Mobile
-
 ```bash
 cd mobile
 npx expo start --clear
-# Scan QR with Expo Go app
 ```
 
 ### Terminal 3: Web
-
 ```bash
 cd web
 npm run dev
-# Open http://localhost:xxxx
 ```
 
----
-
-## ngrok (Guest WiFi)
-
+### ngrok (Guest WiFi)
 ```bash
-# 1. Signup: https://ngrok.com
-# 2. Get token from dashboard
-# 3. Setup
-ngrok config add-authtoken <TOKEN>
-
-# 4. Create tunnel (while API running)
 ngrok http 8000
-
-# 5. Copy HTTPS URL: https://abc123-def456.ngrok-free.dev
-# 6. Update mobile/.env:
-EXPO_PUBLIC_API_URL=https://abc123-def456.ngrok-free.dev
-
-# 7. Restart mobile app
+# Copy HTTPS URL to mobile/.env: EXPO_PUBLIC_API_URL=https://xxx.ngrok-free.dev
 ```
-
-**Note:** URLs expire every 2 hours (free tier). Restart ngrok when needed.
-
----
-
-## Testing
-
-### Health Check
-
-```bash
-curl http://5:8000/health
-# {"status":"ok"}
-```
-
-### Get Dashboard
-
-```bash
-curl http://:8000/reps/me/dashboard \
-  -H "Authorization: Bearer <token>"
-```
-
----
-
-## Troubleshooting
-
-### Backend Issues
-
-**Module not found:**
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt --no-cache-dir
-```
-
-**Port 8000 in use:**
-```bash
-lsof -i :8000 | awk '{print $2}' | xargs kill -9
-```
-
-**Database error:**
-- Check Supabase project exists
-- Verify DATABASE_URL in .env
-- Run SQL to create tables
-
-### Mobile Issues
-
-**Import path errors:**
-Change `../../../lib/api` to `../../lib/api`
-
-**API not found:**
-- Check EXPO_PUBLIC_API_URL in .env
-- Verify API running: `curl http://:8000/health`
-- If ngrok: restart tunnel and update .env
-
-**Bundle errors:**
-```bash
-npx expo start --clear
-```
-
-### ngrok Issues
-
-**Connection refused:**
-- Start API first on port 8000
-- Then start ngrok
-
-**URL expired:**
-- Restart ngrok: `ngrok http 8000`
-- Update .env with new URL
-- Restart mobile app
-
----
 
 ## API Reference
 
-### Health
-```
-GET /health → {"status":"ok"}
-```
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | None | Health check |
+| `/auth/token` | POST | None | Login, get JWT |
+| `/accounts` | GET | Bearer | List store accounts |
+| `/audits` | POST | Bearer | Upload shelf image (multipart) |
+| `/audits` | GET | Bearer | List audits |
+| `/audits/{id}` | GET | Bearer | Get audit detail with observations |
+| `/audits/{id}` | DELETE | Bearer | Delete audit |
+| `/audits/{id}/cancel` | POST | Bearer | Cancel processing audit |
+| `/reps/me/dashboard` | GET | Bearer | Rep dashboard stats |
 
-### Authentication
-```
-POST /auth/token
-Body: {"email": "...", "password": "..."}
-Response: {"access_token": "...", "token_type": "bearer"}
-```
+## Pipeline Stages
 
-### Dashboard
-```
-GET /reps/me/dashboard
-Auth: Bearer token
-Response: {stores_visited, total_audits, avg_quality_score, ...}
-```
+1. **Quality Gate (OpenCV):** Blur detection, exposure check, resolution validation, aspect ratio
+2. **Guardrail (YOLO + CLIP):** Object detection → semantic verification. Rejects non-alcohol, selfies, food
+3. **VLM Extract (Qwen2.5-VL-72B):** Two-pass prompting:
+   - Pass 1: Literal text transcription + visual cue capture
+   - Pass 2: Structured extraction with tiered brand recognition
+4. **RAG Ground (Postgres):** 3-tier SKU matching (exact → fuzzy → embedding) + visual brand fallback
+5. **Judge (Hard Rules + DeepSeek):** Confidence calibration, quality degradation, glare impact
+6. **Persist:** Single transaction writes audit, observations, images, events
 
-### Upload Image
-```
-POST /audits/capture
-Auth: Bearer token
-Body: multipart/form-data file
-Response: {audit_id, status: "processing", ...}
-```
+## Troubleshooting
 
-### Get Results
-```
-GET /audits/{audit_id}/results
-Auth: Bearer token
-Response: {audit_id, status, quality_score, observations: [...]}
-```
-
-### Store Insights
-```
-GET /stores/{account_id}/insights
-Auth: Bearer token
-Response: {insights: [{audit_id, captured_at, observation_count, ...}]}
-```
-
----
-
-## Database Schema
-
-### shelf_audits
-- `id` (UUID)
-- `rep_id` (UUID FK users)
-- `account_id` (UUID FK accounts)
-- `image_path` (TEXT)
-- `capture_quality` (JSONB)
-- `status` (TEXT: captured|processing|extracted|verified|final|error)
-- `captured_at` (TIMESTAMP)
-
-### audit_observations
-- `id` (UUID)
-- `audit_id` (UUID FK shelf_audits)
-- `observation` (JSONB: {sku, brand, price, quantity, confidence_scores, flags})
-- `confidence_score` (NUMERIC)
-- `verified` (BOOLEAN)
-- `judge_verdict` (JSONB: {verdict, reasoning})
-- `grounding_status` (TEXT: grounded|ungrounded|uncertain)
-
-### skus
-- `id` (UUID)
-- `sku_code` (TEXT UNIQUE)
-- `barcode` (TEXT)
-- `brand_id` (UUID FK brands)
-- `product_name` (TEXT)
-- `category` (TEXT)
-- `typical_facings_avg` (INT)
-
-### audit_metrics
-- `id` (UUID)
-- `rep_id` (UUID FK users)
-- `metric_date` (DATE)
-- `total_audits_count` (INT)
-- `successful_audits` (INT)
-- `avg_quality_score` (NUMERIC)
-
----
-
-## Key Features
-
-✅ **Multi-model VLM orchestration** (Qwen + Groq fallback)  
-✅ **Hallucination control** via Judge validation  
-✅ **Quality scoring** (OpenCV blur/lighting/frame)  
-✅ **RAG grounding** (fuzzy + semantic matching)  
-✅ **Real-time dashboards** (mobile + web)  
-✅ **Async processing** with LangGraph  
-✅ **ngrok tunneling** for guest WiFi  
-✅ **Type-safe APIs** (FastAPI + Pydantic)  
-
-
+| Issue | Fix |
+|-------|-----|
+| Module not found | `source .venv/bin/activate && pip install -r requirements.txt` |
+| Port 8000 in use | `lsof -i :8000 \| awk '{print $2}' \| xargs kill -9` |
+| ngrok URL expired | Restart `ngrok http 8000`, update mobile/.env |
+| Mobile import errors | Use `../../../lib/api` not `../../lib/api` |
+| fixture_type CHECK violation | Fixed: `table` and `hand_hold` normalize to `unknown` |
+| Single bottle rejected | Fixed: YOLO 1-bottle defers to CLIP, CLIP threshold lowered to 0.05 |
