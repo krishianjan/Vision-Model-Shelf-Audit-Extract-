@@ -4,7 +4,7 @@ import {
   StyleSheet, ActivityIndicator, RefreshControl, ScrollView, Alert,
 } from "react-native";
 import { useRouter } from "expo-router";
-import { getAudits, deleteAudit, cancelAudit, type AuditSummary } from "../../lib/api";
+import { getAudits, deleteAudit, cancelAudit, type AuditSummary, getRepDashboard, getShareOfShelf, type RepDashboard, type ShareOfShelfSummary } from "../../lib/api";
 import { getAllCaptures, type QueueRow } from "../../lib/db";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -39,39 +39,116 @@ function QueueCard({ row }: { row: QueueRow }) {
   );
 }
 
-function CRMDashboard({ audits }: { audits: AuditSummary[] }) {
-  const total = audits.length;
-  const completed = audits.filter(a => a.status === "final").length;
-  const avgQuality = audits.length > 0 
-    ? Math.round((audits.reduce((sum, a) => sum + ((a as any).capture_quality?.overall_score ?? 0), 0) / audits.length) * 100)
-    : 0;
-  const retakeRequired = audits.filter(a => a.status === "retake_required").length;
+function StatCard({ value, label, color }: { value: string | number; label: string; color?: string }) {
+  return (
+    <View style={styles.statCard}>
+      <Text style={[styles.statValue, color ? { color } : undefined]}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function CRMDashboard() {
+  const [dash, setDash] = useState<RepDashboard | null>(null);
+  const [sos, setSos] = useState<ShareOfShelfSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      const [d, s] = await Promise.all([
+        getRepDashboard().catch(() => null),
+        getShareOfShelf().catch(() => null),
+      ]);
+      setDash(d);
+      setSos(s);
+    } catch {
+      // silent — dashboard is secondary to audit list
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) {
+    return (
+      <View style={styles.dashboard}>
+        <Text style={styles.dashboardTitle}>📊 CRM Dashboard</Text>
+        <ActivityIndicator color="#3b82f6" size="small" style={{ marginVertical: 12 }} />
+      </View>
+    );
+  }
+
+  const summary = dash?.summary;
+  const total = summary?.total_audits ?? 0;
+  const completed = summary?.completed_audits ?? 0;
+  const retakes = summary?.retake_count ?? 0;
+  const rejected = summary?.rejected_count ?? 0;
+  const stores = summary?.stores_visited ?? 0;
+  const quality = summary?.avg_quality_score ?? 0;
+  const pending = summary?.pending_review_count ?? 0;
+
+  const topBrands = (sos?.brands ?? []).slice(0, 5);
+  const totalFacings = sos?.total_facings ?? 0;
 
   return (
     <View style={styles.dashboard}>
-      <Text style={styles.dashboardTitle}>📊 Your Shelf Audit Summary</Text>
-      
+      <Text style={styles.dashboardTitle}>📊 CRM Dashboard</Text>
+
+      {/* Row 1: Core stats */}
       <View style={styles.statsGrid}>
-        <View style={styles.statCard}>
-          <Text style={styles.statValue}>{total}</Text>
-          <Text style={styles.statLabel}>Total Audits</Text>
-        </View>
-        
-        <View style={styles.statCard}>
-          <Text style={[styles.statValue, { color: "#16a34a" }]}>{completed}</Text>
-          <Text style={styles.statLabel}>Completed</Text>
-        </View>
-        
-        <View style={styles.statCard}>
-          <Text style={styles.statValue}>{avgQuality}%</Text>
-          <Text style={styles.statLabel}>Avg Quality</Text>
-        </View>
-        
-        <View style={styles.statCard}>
-          <Text style={[styles.statValue, { color: "#dc2626" }]}>{retakeRequired}</Text>
-          <Text style={styles.statLabel}>Retakes</Text>
-        </View>
+        <StatCard value={total} label="Total Audits" />
+        <StatCard value={completed} label="Completed" color="#16a34a" />
+        <StatCard value={retakes} label="Retakes" color="#dc2626" />
+        <StatCard value={rejected} label="Rejected" color="#6b7280" />
       </View>
+
+      {/* Row 2: Quality + stores + pending */}
+      <View style={styles.statsGrid}>
+        <StatCard value={`${Math.round(quality * 100)}%`} label="Avg Quality" />
+        <StatCard value={stores} label="Stores Visited" />
+        <StatCard value={pending} label="Pending Review" color={pending > 0 ? "#d97706" : undefined} />
+        <StatCard value={totalFacings} label="Total Facings" />
+      </View>
+
+      {/* Share of Shelf */}
+      {topBrands.length > 0 && (
+        <View style={styles.sosContainer}>
+          <Text style={styles.sosTitle}>📈 Share of Shelf (Top 5 Brands)</Text>
+          {topBrands.map((b, i) => {
+            const maxPct = topBrands[0]?.share_pct || 1;
+            return (
+              <View key={b.brand + i} style={styles.sosRow}>
+                <Text style={styles.sosBrand} numberOfLines={1}>{b.brand}</Text>
+                <View style={styles.sosBarBg}>
+                  <View style={[styles.sosBarFill, { width: `${(b.share_pct / maxPct) * 100}%` }]} />
+                </View>
+                <Text style={styles.sosPct}>{b.share_pct}%</Text>
+              </View>
+            );
+          })}
+        </View>
+      )}
+
+      {/* Top Unmatched (Competitive Intel) */}
+      {(dash?.top_unmatched_brands ?? []).length > 0 && (
+        <View style={styles.sosContainer}>
+          <Text style={styles.sosTitle}>🔍 Unmatched Brands (Competitor Signals)</Text>
+          {(dash!.top_unmatched_brands).slice(0, 3).map((u, i) => (
+            <View key={u.brand_read + i} style={styles.unmatchedRow}>
+              <Text style={styles.unmatchedBrand}>{u.brand_read}</Text>
+              <Text style={styles.unmatchedCount}>seen {u.times_seen}x</Text>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {/* Last Activity */}
+      {summary?.last_activity && (
+        <Text style={styles.lastActivity}>
+          Last activity: {summary.last_activity.replace("T", " ").slice(0, 16)}
+        </Text>
+      )}
     </View>
   );
 }
@@ -187,7 +264,7 @@ export default function AuditsScreen() {
         ListHeaderComponent={
           <>
             {/* CRM Dashboard */}
-            <CRMDashboard audits={audits} />
+            <CRMDashboard />
             
             {/* Offline Queue */}
             {queue.length > 0 && (
@@ -321,4 +398,18 @@ const styles = StyleSheet.create({
   qErr: { fontSize: 10, color: "#dc2626", marginTop: 2 },
   
   empty: { textAlign: "center", color: "#9ca3af", marginTop: 60, fontSize: 15 },
+
+  sosContainer: { marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: "#e5e7eb" },
+  sosTitle: { fontSize: 13, fontWeight: "700", color: "#374151", marginBottom: 8 },
+  sosRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
+  sosBrand: { fontSize: 12, fontWeight: "600", color: "#111827", width: 80 },
+  sosBarBg: { flex: 1, height: 8, backgroundColor: "#e5e7eb", borderRadius: 4 },
+  sosBarFill: { height: 8, backgroundColor: "#3b82f6", borderRadius: 4 },
+  sosPct: { fontSize: 12, fontWeight: "700", color: "#3b82f6", width: 40, textAlign: "right" },
+
+  unmatchedRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 },
+  unmatchedBrand: { fontSize: 12, fontWeight: "600", color: "#92400e" },
+  unmatchedCount: { fontSize: 11, color: "#78716c" },
+
+  lastActivity: { fontSize: 11, color: "#9ca3af", marginTop: 10, textAlign: "center" },
 });

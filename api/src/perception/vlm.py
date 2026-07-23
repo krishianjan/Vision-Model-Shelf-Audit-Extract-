@@ -732,6 +732,7 @@ def _parse_observations(pass2: dict) -> list[Observation]:
                 obs_dict["visual_brand_confidence"] = 0.0
 
             result.append(Observation(**obs_dict))
-        except Exception:
-            pass
+        except Exception as e:
+            field_conf_summary = o.get("field_confidence", {}) if isinstance(o, dict) else {}
+            print(f"[WARN] Failed to parse observation: {type(e).__name__}: {str(e)[:120]} | raw_keys={list(o.keys()) if isinstance(o, dict) else type(o).__name__} | conf={field_conf_summary}")
     return result

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import hashlib
 from uuid import UUID, uuid4
 import asyncio
 import asyncpg
@@ -138,13 +139,12 @@ class ShelfAuditAgent:
     async def ainvoke(self, initial_state: dict):
         audit_id = initial_state.get("audit_id")
         try:
-            # Set heartbeat timeout: if graph takes >60s per node, abort
             return await self._graph.ainvoke(initial_state)
-        except TimeoutError:
-            print(f"[ERROR] Pipeline timed out for audit {audit_id}")
+        except (TimeoutError, asyncio.TimeoutError, Exception) as e:
+            reason = "pipeline_timeout_60s" if isinstance(e, (TimeoutError, asyncio.TimeoutError)) else "pipeline_crash"
+            print(f"[ERROR] Pipeline {'timed out' if 'timeout' in reason else 'crashed'} for audit {audit_id}: {e}")
             if audit_id:
                 try:
-                    import json
                     async with self._db.acquire() as conn:
                         await conn.execute(
                             "UPDATE shelf_audits SET status='processing_failed' WHERE id=$1 AND status='processing'",
@@ -152,42 +152,7 @@ class ShelfAuditAgent:
                         )
                         await conn.execute(
                             "INSERT INTO audit_events (audit_id, event_type, payload) VALUES ($1, 'vlm_failed', $2::jsonb)",
-                            audit_id, json.dumps({"reason": "pipeline_timeout_60s"}),
-                        )
-                except Exception:
-                    pass
-            raise
-        except asyncio.TimeoutError:
-            print(f"[ERROR] Pipeline async timeout for audit {audit_id}")
-            if audit_id:
-                try:
-                    import json
-                    async with self._db.acquire() as conn:
-                        await conn.execute(
-                            "UPDATE shelf_audits SET status='processing_failed' WHERE id=$1 AND status='processing'",
-                            audit_id,
-                        )
-                        await conn.execute(
-                            "INSERT INTO audit_events (audit_id, event_type, payload) VALUES ($1, 'vlm_failed', $2::jsonb)",
-                            audit_id, json.dumps({"reason": "async_timeout_120s"}),
-                        )
-                except Exception:
-                    pass
-            raise
-        except Exception as e:
-            # Crash protection: update audit to failed so it doesn't stay stuck
-            print(f"[ERROR] Pipeline crashed for audit {audit_id}: {e}")
-            if audit_id:
-                try:
-                    import json
-                    async with self._db.acquire() as conn:
-                        await conn.execute(
-                            "UPDATE shelf_audits SET status='processing_failed' WHERE id=$1 AND status='processing'",
-                            audit_id,
-                        )
-                        await conn.execute(
-                            "INSERT INTO audit_events (audit_id, event_type, payload) VALUES ($1, 'vlm_failed', $2::jsonb)",
-                            audit_id, json.dumps({"reason": "pipeline_crash", "error": str(e)[:500]}),
+                            audit_id, json.dumps({"reason": reason, "error": str(e)[:500]}),
                         )
                 except Exception:
                     pass
@@ -246,8 +211,8 @@ class ShelfAuditAgent:
         image = state.get("processed_bytes") or state["image_bytes"]
         try:
             # Enhance image before VLM (handles glare, angle, thumb, dark coolers)
-            # TEMPORARILY BYPASSED — numpy type bug in HoughLinesP
-            # enhanced_bytes, enh_report = enhance_image(image)
+            # NOTE: bypassed due to numpy type bug in HoughLinesP (int32 overflow on macOS ARM).
+            # When fixed, re-enable: enhanced_bytes, enh_report = enhance_image(image)
             enhanced_bytes = image
             enh_report = {"applied": []}
             if enh_report["applied"]:
@@ -445,7 +410,6 @@ class ShelfAuditAgent:
         final_obs = state.get("final_observations") or []
         events = state.get("events") or []
 
-        import hashlib
         content_hash = quality_dict.get("content_hash") or hashlib.sha256(image_bytes).hexdigest()
         model_version = vlm_dict.get("model_used") or "unknown"
         vlm_latency = vlm_dict.get("latency_ms", 0)
@@ -597,7 +561,6 @@ class ShelfAuditAgent:
         quality_dict["guardrail_verdict"] = gr_dict.get("verdict", "reject")
         quality_dict["rejection_reason"] = gr_dict.get("rejection_reason") or gr_dict.get("reason")
 
-        import hashlib
         content_hash = quality_dict.get("content_hash") or hashlib.sha256(state["image_bytes"]).hexdigest()
 
         async with self._db.acquire() as conn:
@@ -674,23 +637,10 @@ def _route_vlm(state: PipelineState) -> str:
 
 
 def _route_confidence(state: PipelineState) -> str:
-    """
-    After judge calibration, check confidence score:
-    - >= 0.55: ACCEPT (persist_final — observations saved)
-    - < 0.55: FLAG (persist_final with status='retake_required' — observations still saved)
-    
-    Observations are ALWAYS persisted so the UI can show extracted data
-    even when the audit is flagged for retake.
-    """
     vlm_dict = state.get("vlm_result") or {}
     confidence = vlm_dict.get("confidence_overall", 0.0)
-
-    if confidence >= 0.55:
-        print(f"[ROUTE] Confidence {confidence:.2f} >= 0.55 → ACCEPT (final)")
-    else:
-        print(f"[ROUTE] Confidence {confidence:.2f} < 0.55 → FLAG (retake_required — observations saved)")
-    
-    # Always route to persist_final so observations are saved
+    flag = "retake_required" if confidence < 0.55 else "final"
+    print(f"[ROUTE] Confidence {confidence:.2f} → {flag}")
     return "persist_final"
 
 

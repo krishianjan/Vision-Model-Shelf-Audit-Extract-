@@ -517,3 +517,85 @@ async def org_dashboard(
             for r in coverage
         ],
     }
+
+
+# ─── Share-of-Shelf Summary (cross-audit) ─────────────────────────────────────
+
+@router.get("/share-of-shelf/summary")
+async def share_of_shelf_summary(
+    request: Request,
+    account_id: UUID | None = None,
+    limit: int = 15,
+    user: AuthUser = Depends(get_current_user),
+):
+    """
+    Aggregate share-of-shelf across audits.
+    Groups by brand_read (or visual_brand_guess fallback), sums facings,
+    computes percentage of total facings.
+
+    Optional account_id filter to scope to single store.
+    Returns: total_facings, total_audits, brands: [{brand, facings, share_pct, audit_count, avg_price, eye_level_count}]
+    """
+    db = request.app.state.db
+    if limit > 50:
+        limit = 50
+
+    where = ["sa.superseded_by IS NULL", "(sa.captured_by = $1 OR sa.org_id = $2)"]
+    params = [user.user_id, user.org_id]
+
+    if account_id:
+        where.append("sa.account_id = $" + str(len(params) + 1))
+        params.append(account_id)
+
+    where_sql = " AND ".join(where)
+
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT
+              COALESCE(ao.brand_read, ao.visual_brand_guess, 'Unknown') AS brand,
+              COALESCE(SUM(ao.facings), 0) AS total_facings,
+              COUNT(DISTINCT ao.audit_id) AS audit_count,
+              AVG(ao.price_value) AS avg_price,
+              COUNT(CASE WHEN ao.shelf_position IN ('eye_level','top') THEN 1 END) AS eye_level_count,
+              COUNT(CASE WHEN ao.matched_sku_id IS NOT NULL THEN 1 END) AS confirmed_count
+            FROM audit_observations ao
+            JOIN shelf_audits sa ON sa.id = ao.audit_id
+            WHERE {where_sql}
+            GROUP BY COALESCE(ao.brand_read, ao.visual_brand_guess, 'Unknown')
+            ORDER BY total_facings DESC
+            LIMIT {limit}
+            """,
+            *params,
+        )
+
+        total_row = await conn.fetchrow(
+            f"""
+            SELECT COALESCE(SUM(ao.facings), 0) AS grand_total
+            FROM audit_observations ao
+            JOIN shelf_audits sa ON sa.id = ao.audit_id
+            WHERE {where_sql}
+            """,
+            *params,
+        )
+
+    grand_total = total_row["grand_total"] if total_row else 0
+
+    brands = []
+    for r in rows:
+        facings = r["total_facings"] or 0
+        brands.append({
+            "brand": r["brand"],
+            "facings": facings,
+            "share_pct": round(facings / grand_total * 100, 1) if grand_total > 0 else 0.0,
+            "audit_count": r["audit_count"] or 0,
+            "avg_price": round(float(r["avg_price"]), 2) if r["avg_price"] else None,
+            "eye_level_count": r["eye_level_count"] or 0,
+            "confirmed_count": r["confirmed_count"] or 0,
+        })
+
+    return {
+        "total_facings": grand_total,
+        "brand_count": len(brands),
+        "brands": brands,
+    }

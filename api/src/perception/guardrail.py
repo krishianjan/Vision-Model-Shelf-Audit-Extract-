@@ -12,6 +12,7 @@ Architecture:
 import json
 import os
 import time
+import hashlib
 from io import BytesIO
 import asyncio
 import numpy as np
@@ -43,60 +44,44 @@ class Guardrail:
         self.yolo_enabled = os.getenv("YOLO_ENABLED", "1") == "1"
 
         # Pre-encode CLIP prompts for alcohol shelf detection
-        # Production-grade semantic separation: store vs e-commerce vs non-alcohol vs garbage
-        # Engineered to avoid CLIP confusion (e.g., "person holding" vs "bottle in hand")
-        self.shelf_prompts = [
-                    # =================================================================
-                    # POSITIVE: Real-World Store Captures (Sales Rep Archetypes)
-                    # =================================================================
-                    "liquor store shelf set with spirits bottles",
-                    "retail alcohol aisle facing rows of bottles",
-                    "commercial beverage cooler door filled with beer and seltzers",
-                    "liquor store promotional endcap display",
-                    "freestanding case stack display of liquor boxes and bottles in an aisle",
-                    "point of sale counter display with small nips or airline liquor bottles",
-                    "close up of liquor bottle price tags on a shelf edge",
-                    "organized backbar display of spirits bottles in a tavern or retail store",
-
-                    # =================================================================
-                    # POSITIVE: Single Bottle Close-Ups (Common Internet/Testing Images)
-                    # =================================================================
-                    "single glass whiskey bottle on a table close up photo",
-                    "a vodka bottle photographed from above on a counter",
-                    "one dark liquor bottle standing alone on a surface",
-                    "professional photography of a single spirit bottle isolated",
-                    "a tequila or rum bottle snapped with a phone camera in a room",
-
-                    # =================================================================
-                    # POSITIVE: E-Commerce & Web Captures (Google Images Archetypes)
-                    # =================================================================
-                    "clean e-commerce product listing shot of an alcohol bottle on pure white background",
-                    "isolated studio photography of a spirits bottle with high contrast lighting",
-                    "digital mockup or transparent PNG of a liquor bottle packaging",
-                    "close up macro photograph of a pristine wine or spirits bottle label",
-                    "bright high-exposure product image of a single alcohol bottle",
-                    "manufacturer stock photo of a branded liquor bottle",
-
-                    # =================================================================
-                    # POSITIVE: Hand-held single bottle (real rep scenario)
-                    # =================================================================
-                    "hand holding a whiskey bottle close to camera",
-                    "person holding a liquor bottle for shelf audit",
-                    "close-up of an alcohol bottle held in hand",
-                    "single spirit bottle held up against store shelf",
-
-                    # =================================================================
-                    # NEGATIVE: Non-Alcoholic Beverages (The Traps)
-                    # =================================================================
+        # Tags split them into POSITIVE (alcohol) vs NEGATIVE (non-alcohol/garbage)
+        positive_prompts = [
+            # POSITIVE: Real-World Store Captures (Sales Rep Archetypes)
+            "liquor store shelf set with spirits bottles",
+            "retail alcohol aisle facing rows of bottles",
+            "commercial beverage cooler door filled with beer and seltzers",
+            "liquor store promotional endcap display",
+            "freestanding case stack display of liquor boxes and bottles in an aisle",
+            "point of sale counter display with small nips or airline liquor bottles",
+            "close up of liquor bottle price tags on a shelf edge",
+            "organized backbar display of spirits bottles in a tavern or retail store",
+            # POSITIVE: Single Bottle Close-Ups
+            "single glass whiskey bottle on a table close up photo",
+            "a vodka bottle photographed from above on a counter",
+            "one dark liquor bottle standing alone on a surface",
+            "professional photography of a single spirit bottle isolated",
+            "a tequila or rum bottle snapped with a phone camera in a room",
+            # POSITIVE: E-Commerce & Web Captures
+            "clean e-commerce product listing shot of an alcohol bottle on white background",
+            "isolated studio photography of a spirits bottle with high contrast lighting",
+            "digital mockup or transparent PNG of a liquor bottle packaging",
+            "close up macro photograph of a pristine wine or spirits bottle label",
+            "bright high-exposure product image of a single alcohol bottle",
+            "manufacturer stock photo of a branded liquor bottle",
+            # POSITIVE: Hand-held single bottle
+            "hand holding a whiskey bottle close to camera",
+            "person holding a liquor bottle for shelf audit",
+            "close-up of an alcohol bottle held in hand",
+            "single spirit bottle held up against store shelf",
+        ]
+        negative_prompts = [
+            # NEGATIVE: Non-Alcoholic Beverages
             "grocery shelf stacked with plastic water bottles",
             "soda pop and carbonated juice cans on display",
             "energy drinks, sports drinks, or liquid mixers on retail racks",
             "milk jugs and dairy items inside a supermarket cooler",
             "bottled iced coffee, tea, or healthy juice drinks",
-
-            # =================================================================
-            # NEGATIVE: Wrong Context / Garbage Images (Unambiguous rejection)
-            # =================================================================
+            # NEGATIVE: Wrong Context / Garbage Images
             "blurry selfie of a person smiling or posing",
             "crowded bar scene with people drinking or holding cups",
             "interior of a residential kitchen cabinet or home pantry",
@@ -105,6 +90,8 @@ class Guardrail:
             "blurry, dark, or unfocused photo of an empty floor or ceiling",
             "close up of a paper receipt or shipping label",
         ]
+        self._num_positive = len(positive_prompts)
+        self.shelf_prompts = positive_prompts + negative_prompts
 
         with torch.no_grad():
             inputs = self.clip_processor(
@@ -130,8 +117,6 @@ class Guardrail:
         # Free image_bytes immediately after loading into PIL
         # PIL has already decoded it into memory, so raw bytes can be released
         del image_bytes
-        import gc
-        gc.collect()
 
         # Stage 1: Try YOLO (fast object detection if available)
         t1 = time.perf_counter()
@@ -291,9 +276,9 @@ class Guardrail:
                 img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
                 sims = (img_feat @ self.clip_text_feats.T).squeeze(0).cpu().numpy()
 
-            # Split: first 23 = positive (alcohol/spirits), last 17 = negative (non-alcohol/garbage)
-            pos_sims = sims[:23]
-            neg_sims = sims[23:]
+            # Split dynamically from stored count — no hardcode magic numbers
+            pos_sims = sims[:self._num_positive]
+            neg_sims = sims[self._num_positive:]
 
             # ENSEMBLE: Average each group separately
             avg_pos = float(np.mean(pos_sims))

@@ -139,3 +139,48 @@ export async function uploadAudit(
 export async function getJSON(path: string): Promise<any> {
   return req("GET", path);
 }
+
+// ─── CRM Dashboard ───────────────────────────────────────────────────
+
+export interface ShareOfShelfBrand {
+  brand: string;
+  facings: number;
+  share_pct: number;
+  audit_count: number;
+  avg_price: number | null;
+  eye_level_count: number;
+  confirmed_count: number;
+}
+
+export interface ShareOfShelfSummary {
+  total_facings: number;
+  brand_count: number;
+  brands: ShareOfShelfBrand[];
+}
+
+export interface RepDashboard {
+  rep_id: string;
+  summary: {
+    stores_visited: number;
+    total_audits: number;
+    completed_audits: number;
+    retake_count: number;
+    rejected_count: number;
+    avg_quality_score: number;
+    last_activity: string | null;
+    pending_review_count: number;
+  };
+  stores: Array<{
+    name: string | null;
+    channel_type: string | null;
+    last_visit: string;
+    visit_count: number;
+  }>;
+  top_unmatched_brands: Array<{ brand_read: string; times_seen: number }>;
+}
+
+export const getShareOfShelf = (account_id?: string) =>
+  req<ShareOfShelfSummary>("GET", `/share-of-shelf/summary${account_id ? `?account_id=${account_id}` : ""}`);
+
+export const getRepDashboard = () =>
+  req<RepDashboard>("GET", "/reps/me/dashboard");
